@@ -274,15 +274,59 @@ async function auto(){
   }
 }
 async function loadFF(){
-  if(ff)return;const{FFmpeg}=FFmpegWASM,{toBlobURL}=FFmpegUtil,f=new FFmpeg();
-  f.on('log',({message})=>{S.log.push(message);if(S.log.length>12)S.log.shift()});
-  f.on('progress',({progress})=>{if(S.pm)S.pm.textContent='กำลังตัดต่อ '+Math.round(progress*100)+'%'});
-  const b='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
-  await f.load({coreURL:await toBlobURL(b+'/ffmpeg-core.js','text/javascript'),wasmURL:await toBlobURL(b+'/ffmpeg-core.wasm','application/wasm'),
-    classWorkerURL:await toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/814.ffmpeg.js','text/javascript')});
-  ff=f;
+  if(ff) return;
+
+  const { FFmpeg } = FFmpegWASM;
+  const { toBlobURL } = FFmpegUtil;
+  const f = new FFmpeg();
+
+  f.on('log', ({message}) => {
+    S.log.push(message);
+    if(S.log.length > 12) S.log.shift();
+  });
+
+  f.on('progress', ({progress}) => {
+    if(S.pm) {
+      S.pm.textContent =
+        'กำลังตัดต่อ ' + Math.round(progress * 100) + '%';
+    }
+  });
+
+  const baseURL =
+    'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd';
+
+  try {
+    const coreURL = await toBlobURL(
+      baseURL + '/ffmpeg-core.js',
+      'text/javascript'
+    );
+
+    const wasmURL = await toBlobURL(
+      baseURL + '/ffmpeg-core.wasm',
+      'application/wasm'
+    );
+
+    const workerURL = await toBlobURL(
+      'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/814.ffmpeg.js',
+      'text/javascript'
+    );
+
+    await f.load({
+      coreURL,
+      wasmURL,
+      classWorkerURL: workerURL
+    });
+
+    ff = f;
+    console.log('FFmpeg loaded successfully');
+
+  } catch (error) {
+    f.terminate();
+    throw new Error(
+      'โหลด FFmpeg ไม่สำเร็จ: ' + errMsg(error)
+    );
+  }
 }
-S.log=[];
 async function run(args){
   S.log=[];const rc=await ff.exec(args);
   if(rc!==0)throw new Error('ffmpeg ล้มเหลว (รหัส '+rc+') '+S.log.filter(l=>/error|not found|invalid|unsupported|fail/i.test(l)).slice(-2).join(' | '));
