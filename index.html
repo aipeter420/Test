@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="th"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Clip Assistant</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/umd/index.js"></script>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--card:#f4f4f6;--pri:#6d28d9;--bd:#ddd}
+@media(prefers-color-scheme:dark){:root{--bg:#141418;--fg:#eee;--card:#202028;--bd:#3a3a46}}
+*{box-sizing:border-box}body{margin:0;font:15px system-ui,sans-serif;background:var(--bg);color:var(--fg);padding:12px;max-width:720px;margin:auto}
+input,textarea,select,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:8px;width:100%;margin:3px 0}
+button{background:var(--pri);color:#fff;border:0;cursor:pointer;width:auto;padding:8px 14px}
+button.g{background:var(--card);color:var(--fg);border:1px solid var(--bd)}
+nav{display:flex;gap:6px;margin-bottom:10px}nav button{flex:1}
+.card{background:var(--card);padding:10px;border-radius:10px;margin:8px 0}
+.row{display:flex;gap:6px}.row>*{flex:1}video{width:100%;border-radius:8px;background:#000}
+h3{margin:.4em 0}small{opacity:.7}
+</style></head><body>
+<div id="app"></div>
+<script>
+// ====== ใส่ค่าของโปรเจกต์ Supabase ======
+const SUPABASE_URL='https://lvdcexqnlguolspgwjwf.supabase.co', SUPABASE_KEY='sb_publishable_dOq3gzyE5ovBfKJaF5SDOg_f6bYop8z';
+// ========================================
+const sb=supabase.createClient(SUPABASE_URL,SUPABASE_KEY), $=s=>document.querySelector(s);
+const S={tab:'clips',products:[],clips:[],cur:null,shots:[]};
+const STATUS=['idea','shooting','editing','posted'];
+const esc=t=>(t??'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function init(){
+  const{data:{session}}=await sb.auth.getSession();
+  session?load():loginUI();
+}
+function loginUI(){
+  $('#app').innerHTML=`<h3>เข้าสู่ระบบ</h3><input id=e type=email placeholder=อีเมล><input id=p type=password placeholder=รหัสผ่าน>
+  <div class=row><button onclick="auth('in')">เข้าสู่ระบบ</button><button class=g onclick="auth('up')">สมัคร</button></div>`;
+}
+async function auth(m){
+  const c={email:$('#e').value,password:$('#p').value};
+  const{error}=m=='in'?await sb.auth.signInWithPassword(c):await sb.auth.signUp(c);
+  error?alert(error.message):load();
+}
+async function load(){
+  const[a,b]=await Promise.all([sb.from('products').select('*').order('created_at',{ascending:false}),
+    sb.from('clips').select('*').order('created_at',{ascending:false})]);
+  S.products=a.data||[];S.clips=b.data||[];render();
+}
+function render(){
+  $('#app').innerHTML=`<nav>${[['products','สินค้า'],['clips','คลิป'],['auto','ออโต้'],['edit','ตัดต่อ']].map(([k,v])=>
+   `<button class="${S.tab==k?'':'g'}" onclick="S.tab='${k}';render()">${v}</button>`).join('')}
+   <button class=g onclick="sb.auth.signOut().then(loginUI)">ออก</button></nav><div id=v></div>`;
+  ({products:pView,clips:cView,auto:aView,edit:eView})[S.tab]();
+}
+// ---------- สินค้า ----------
+function pView(){
+  $('#v').innerHTML=`<div class=card><h3>เพิ่มสินค้า</h3><input id=n placeholder=ชื่อสินค้า><input id=l placeholder=ลิงก์ affiliate>
+  <input id=pr type=number placeholder=ราคา><textarea id=nt placeholder=จุดเด่น/โน้ต></textarea><button onclick=addP()>บันทึก</button></div>`+
+  S.products.map(p=>`<div class=card><b>${esc(p.name)}</b> <small>฿${p.price??'-'}</small><br><small>${esc(p.aff_link)}</small>
+  <br><button class=g onclick="delRow('products','${p.id}')">ลบ</button></div>`).join('');
+}
+async function addP(){
+  if(!$('#n').value)return;
+  await sb.from('products').insert({name:$('#n').value,aff_link:$('#l').value,price:$('#pr').value||null,notes:$('#nt').value});load();
+}
+async function delRow(t,id){if(confirm('ลบ?')){await sb.from(t).delete().eq('id',id);load();}}
+// ---------- คลิป (วางแผน) ----------
+function cView(){
+  const c=S.cur;
+  if(!c){
+    $('#v').innerHTML=`<button onclick="S.cur={shot_list:[],status:'idea'};S.shots=[];cView()">+ คลิปใหม่</button>`+
+    S.clips.map(x=>`<div class=card onclick="openClip('${x.id}')"><b>${esc(x.title)||'(ไม่มีชื่อ)'}</b> <small>${x.status}</small></div>`).join('');return;
+  }
+  $('#v').innerHTML=`<div class=card><input id=t placeholder=ชื่อคลิป value="${esc(c.title)}">${c.out_path?`<button class=g onclick="openOut('${c.out_path}')">▶ คลิปที่ตัดแล้ว</button>`:''}
+  <select id=pid><option value="">— เลือกสินค้า —</option>${S.products.map(p=>`<option value=${p.id} ${p.id==c.product_id?'selected':''}>${esc(p.name)}</option>`).join('')}</select>
+  <select id=st>${STATUS.map(s=>`<option ${s==c.status?'selected':''}>${s}</option>`).join('')}</select>
+  <button class=g onclick=tpl()>สร้างสคริปต์ตั้งต้น (Hook→Demo→CTA)</button>
+  <textarea id=sc rows=7 placeholder=สคริปต์>${esc(c.script)}</textarea>
+  <h3>Shot list</h3><div id=sh></div><button class=g onclick="S.shots.push({t:'',d:''});shots()">+ ช็อต</button>
+  <textarea id=cp rows=4 placeholder=แคปชัน>${esc(c.caption)}</textarea>
+  <div class=row><button onclick=saveC()>บันทึก</button><button class=g onclick=copyCap()>คัดลอกแคปชัน+ลิงก์</button><button class=g onclick="S.cur=null;cView()">กลับ</button></div>
+  ${c.id?`<button class=g onclick="delRow('clips','${c.id}');S.cur=null">ลบคลิป</button>`:''}</div>`;
+  shots();
+}
+function openClip(id){S.cur=S.clips.find(x=>x.id==id);S.shots=[...(S.cur.shot_list||[])];cView();}
+function shots(){
+  $('#sh').innerHTML=S.shots.map((s,i)=>`<div class=row><input style="max-width:90px" placeholder="0:00-0:03" value="${esc(s.t)}" oninput="S.shots[${i}].t=this.value">
+  <input placeholder=ภาพ/การเคลื่อนไหว value="${esc(s.d)}" oninput="S.shots[${i}].d=this.value">
+  <button class=g style="flex:0" onclick="S.shots.splice(${i},1);shots()">✕</button></div>`).join('');
+}
+function prod(){return S.products.find(p=>p.id==$('#pid').value)}
+function tpl(){
+  const p=prod(),n=p?p.name:'สินค้า';
+  $('#sc').value=`[Hook 0-3วิ] เคยเจอปัญหานี้ไหม? …\n[ปัญหา 3-8วิ] …\n[โชว์สินค้า 8-20วิ] ${n} ${p?.notes||'จุดเด่น 1-2-3'}\n[พิสูจน์/รีวิว] …\n[CTA] กดตะกร้าเหลืองด้านล่างได้เลย`;
+  S.shots=[{t:'0:00-0:03',d:'Hook: ใบหน้า/ปัญหา close-up'},{t:'0:03-0:08',d:'โชว์ปัญหา'},{t:'0:08-0:20',d:`โชว์ ${n} ใช้งานจริง`},{t:'0:20-0:25',d:'CTA + ตะกร้า'}];shots();
+}
+async function saveC(){
+  const r={title:$('#t').value,product_id:$('#pid').value||null,status:$('#st').value,script:$('#sc').value,caption:$('#cp').value,shot_list:S.shots};
+  const q=S.cur.id?sb.from('clips').update(r).eq('id',S.cur.id):sb.from('clips').insert(r);
+  const{error}=await q;if(error)return alert(error.message);S.cur=null;load();
+}
+function copyCap(){const p=prod();navigator.clipboard.writeText($('#cp').value+(p?.aff_link?'\n'+p.aff_link:''));alert('คัดลอกแล้ว')}
+// ---------- ตัดต่อ (ffmpeg.wasm ในเบราว์เซอร์) ----------
+let ff=null;
+function eView(){
+  $('#v').innerHTML=`<div class=card><input id=f type=file accept="video/*" onchange="pv(this)"><video id=pvv controls playsinline></video>
+  <div class=row><div><small>เริ่ม (วิ)</small><input id=s type=number value=0 step=0.1></div><div><small>จบ (วิ)</small><input id=e type=number value=15 step=0.1></div></div>
+  <select id=fmt><option value=v>ครอป 9:16 (720×1280)</option><option value=n>ไม่ครอป</option></select>
+  <label><input type=checkbox id=mu style="width:auto"> ปิดเสียง</label><br>
+  <div class=card><b>ซับตามคำพูด</b><select id=md><option value=Xenova/whisper-small>แม่นกว่า (small ~250MB)</option><option value=Xenova/whisper-base>เร็วกว่า (base ~80MB)</option></select>
+  <div class=row><select id=lg><option value=thai>ภาษาพูด: ไทย</option><option value=english>อังกฤษ</option><option value=chinese>จีน</option><option value=japanese>ญี่ปุ่น</option><option value=korean>เกาหลี</option><option value=vietnamese>เวียดนาม</option><option value=indonesian>อินโดนีเซีย</option></select>
+  <select id=tp><option value=def>เทมเพลต: ค่าเริ่มต้น</option><option value=yellow>ตัวเหลือง</option><option value=box>พื้นหลังดำ</option><option value=big>ตัวใหญ่หนา</option></select></div>
+  <div class=row><select id=ps><option value=bot>ตำแหน่ง: ล่าง</option><option value=mid>กลาง</option><option value=top>บน</option></select>
+  <select id=sz><option value=m>ขนาด: กลาง</option><option value=s>เล็ก</option><option value=l>ใหญ่</option></select></div>
+  <button class=g onclick=tr()>ถอดเสียงเป็นซับ</button> <small id=tm></small><div id=subs></div>
+  <label><input type=checkbox id=bs checked style="width:auto"> ฝังซับในคลิป</label></div>
+  <button onclick=cut()>ตัดต่อ & ส่งออก</button> <small id=msg></small><div id=out></div></div>
+  <small>ประมวลผลในเครื่อง ไม่อัปโหลดวิดีโอ · ไฟล์ใหญ่ควรไม่เกิน ~200MB</small>`;
+  subsUI();
+}
+function pv(i){const f=i.files[0];if(f){const v=$('#pvv');v.src=URL.createObjectURL(f);v.onloadedmetadata=()=>$('#e').value=Math.min(v.duration,60).toFixed(1)}}
+async function cut(){
+  const file=$('#f').files[0];if(!file)return alert('เลือกวิดีโอก่อน');
+  const m=$('#msg');m.textContent='กำลังโหลด ffmpeg…';
+  try{
+    if(!ff){
+      const{FFmpeg}=FFmpegWASM,{toBlobURL}=FFmpegUtil;ff=new FFmpeg();
+      ff.on('progress',({progress})=>m.textContent='กำลังตัดต่อ '+Math.round(progress*100)+'%');
+      const b='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+      await ff.load({coreURL:await toBlobURL(b+'/ffmpeg-core.js','text/javascript'),wasmURL:await toBlobURL(b+'/ffmpeg-core.wasm','application/wasm'),
+        classWorkerURL:await toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/814.ffmpeg.js','text/javascript')});
+    }
+    const s=+$('#s').value,e=+$('#e').value,crop=$('#fmt').value=='v',subs=$('#bs').checked?S.subs.filter(x=>x.t.trim()):[];
+    const v=$('#pvv'),W=crop?720:(v.videoWidth&~1),H=crop?1280:(v.videoHeight&~1),bh=Math.round(W*0.5),ps=$('#ps').value,y=Math.round(ps=='top'?H*.08:ps=='mid'?(H-bh)/2:H-bh-H*.08);
+    const args=['-ss',''+s,'-i','in.mp4'];
+    for(let i=0;i<subs.length;i++){await ff.writeFile('s'+i+'.png',await subPng(subs[i].t,W,bh));args.push('-i','s'+i+'.png')}
+    args.push('-t',''+(e-s));
+    if(subs.length||crop){
+      let f=`[0:v]${crop?'crop=ih*9/16:ih,scale=720:1280':'null'}[v0]`;
+      subs.forEach((x,i)=>f+=`;[v${i}][${i+1}:v]overlay=0:${y}:enable='between(t,${x.a},${x.b})'[v${i+1}]`);
+      args.push('-filter_complex',f,'-map',`[v${subs.length}]`,...($('#mu').checked?[]:['-map','0:a?']));
+    }
+    args.push('-c:v','libx264','-preset','ultrafast','-crf','28',...($('#mu').checked?['-an']:['-c:a','aac']),'out.mp4');
+    await ff.writeFile('in.mp4',await FFmpegUtil.fetchFile(file));
+    await ff.exec(args);
+    const d=await ff.readFile('out.mp4'),u=URL.createObjectURL(new Blob([d.buffer],{type:'video/mp4'}));
+    $('#out').innerHTML=`<video src="${u}" controls playsinline></video><a href="${u}" download="clip.mp4"><button>ดาวน์โหลด</button></a>`;m.textContent='เสร็จแล้ว';
+  }catch(x){m.textContent='ผิดพลาด: '+x.message}
+}
+// ---------- ซับตามคำพูด (Whisper ในเบราว์เซอร์) ----------
+S.subs=[];
+function subsUI(){
+  $('#subs').innerHTML=S.subs.map((x,i)=>`<div class=row><input style="max-width:68px" type=number step=0.1 value=${x.a} oninput="S.subs[${i}].a=+this.value">
+  <input style="max-width:68px" type=number step=0.1 value=${x.b} oninput="S.subs[${i}].b=+this.value">
+  <input value="${esc(x.t)}" oninput="S.subs[${i}].t=this.value"><button class=g style="flex:0" onclick="S.subs.splice(${i},1);subsUI()">✕</button></div>`).join('');
+}
+async function audio16k(file){
+  const ctx=new AudioContext(),ab=await ctx.decodeAudioData(await file.arrayBuffer());ctx.close();
+  const oc=new OfflineAudioContext(1,Math.ceil(ab.duration*16000),16000),src=oc.createBufferSource();
+  src.buffer=ab;src.connect(oc.destination);src.start();
+  return (await oc.startRendering()).getChannelData(0);
+}
+async function tr(){
+  const file=$('#f').files[0];if(!file)return alert('เลือกวิดีโอก่อน');
+  const m=$('#tm'),s=+$('#s').value,e=+$('#e').value;
+  try{
+    m.textContent='กำลังแยกเสียง…';
+    const au=(await audio16k(file)).slice(Math.floor(s*16000),Math.floor(e*16000));
+    m.textContent='กำลังโหลดโมเดล (ครั้งแรกนาน)…';
+    const{pipeline}=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2');
+    const asr=await pipeline('automatic-speech-recognition',$('#md').value,{dtype:'q8',
+      progress_callback:p=>{if(p.status=='progress')m.textContent='โหลดโมเดล '+Math.round(p.progress)+'%'}});
+    m.textContent='กำลังถอดเสียง…';
+    const r=await asr(au,{language:$('#lg').value,task:'transcribe',return_timestamps:true,chunk_length_s:30,stride_length_s:5});
+    S.subs=(r.chunks||[]).filter(c=>c.text.trim()).map(c=>({a:+c.timestamp[0].toFixed(1),b:+(c.timestamp[1]??(e-s)).toFixed(1),t:c.text.trim()}));
+    m.textContent='เสร็จแล้ว แก้ข้อความ/เวลาได้';subsUI();
+  }catch(x){m.textContent='ผิดพลาด: '+x.message}
+}
+// วาดซับเป็น PNG ด้วย canvas (ให้เบราว์เซอร์จัดวรรณยุกต์ไทยเอง) แล้วให้ ffmpeg overlay
+function subPng(t,W,bh){
+  const tp=$('#tp').value,k={s:.045,m:.06,l:.08}[$('#sz').value]*(tp=='big'?1.2:1),fs=Math.round(W*k);
+  const c=document.createElement('canvas');c.width=W;c.height=bh;const g=c.getContext('2d');
+  g.font=`bold ${fs}px "Noto Sans Thai","Sarabun",sans-serif`;g.textAlign='center';g.textBaseline='middle';g.lineJoin='round';
+  const sp=/\s/.test(t),toks=sp?t.split(/(?<=\s)/):[...t],MARK=/[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]/,lines=[];let ln='';
+  for(const tk of toks){
+    if(!(!sp&&MARK.test(tk))&&ln&&g.measureText(ln+tk).width>W*0.9){lines.push(ln.trimEnd());ln=tk}else ln+=tk;
+  }
+  lines.push(ln.trimEnd());
+  const lh=fs*1.3,y0=bh/2-(lines.length-1)*lh/2;
+  lines.forEach((l,i)=>{
+    const y=y0+i*lh;
+    if(tp=='box'){const w=g.measureText(l).width+fs*.6;g.fillStyle='rgba(0,0,0,.65)';g.fillRect(W/2-w/2,y-lh/2,w,lh);g.fillStyle='#fff';g.fillText(l,W/2,y)}
+    else{g.lineWidth=fs/(tp=='big'?4:5);g.strokeStyle='#000';g.strokeText(l,W/2,y);g.fillStyle=tp=='yellow'?'#ffe600':'#fff';g.fillText(l,W/2,y)}
+  });
+  return new Promise(r=>c.toBlob(b=>b.arrayBuffer().then(a=>r(new Uint8Array(a))),'image/png'));
+}
+// ---------- ออโต้: หลายคลิป → คลิปสำเร็จ ----------
+const MK=/[\u0E31\u0E34-\u0E3A\u0E47-\u0E4E]/;
+async function openOut(p){const{data}=await sb.storage.from('clips').createSignedUrl(p,3600);if(data)window.open(data.signedUrl)}
+function aView(){
+  $('#v').innerHTML=`<div class=card><b>ออโต้: โยนหลายคลิป → ได้คลิปสำเร็จ</b>
+  <input id=af type=file accept="video/*" multiple>
+  <select id=apid><option value="">— สินค้า (ใส่การ์ด CTA ท้ายคลิป) —</option>${S.products.map(p=>`<option value=${p.id}>${esc(p.name)}</option>`).join('')}</select>
+  <input id=act value="กดตะกร้าเหลืองด้านล่างได้เลย">
+  <select id=tl><option value=30>ความยาวสูงสุด 30 วิ</option><option value=45>45 วิ</option><option value=60 selected>60 วิ</option><option value=90>90 วิ</option></select>
+  <div class=row><select id=lg><option value=thai>ภาษาพูด: ไทย</option><option value=english>อังกฤษ</option><option value=chinese>จีน</option><option value=japanese>ญี่ปุ่น</option><option value=korean>เกาหลี</option></select>
+  <select id=md><option value=Xenova/whisper-small>แม่นกว่า (small)</option><option value=Xenova/whisper-base>เร็วกว่า (base)</option></select></div>
+  <div class=row><select id=tp><option value=def>ซับ: ค่าเริ่มต้น</option><option value=yellow>ตัวเหลือง</option><option value=box>พื้นหลังดำ</option><option value=big>ตัวใหญ่หนา</option></select>
+  <select id=ps><option value=bot>ล่าง</option><option value=mid>กลาง</option><option value=top>บน</option></select>
+  <select id=sz><option value=m>กลาง</option><option value=s>เล็ก</option><option value=l>ใหญ่</option></select></div>
+  <label><input type=checkbox id=as checked style="width:auto"> ใส่ซับ</label><br>
+  <button onclick=auto()>เริ่มอัตโนมัติ</button> <small id=am></small><div id=ao></div></div>
+  <small>ตัดช่วงที่ไม่มีคำพูดออก → ต่อตามลำดับไฟล์ → ครอป 9:16 → ใส่ซับ → ตัดท้ายให้พอดีความยาว · ประมวลผลในเครื่อง ใช้เวลาหลายนาที อย่าปิดหน้านี้</small>`;
+}
+async function loadFF(){
+  if(ff)return;const{FFmpeg}=FFmpegWASM,{toBlobURL}=FFmpegUtil;ff=new FFmpeg();
+  const b='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+  await ff.load({coreURL:await toBlobURL(b+'/ffmpeg-core.js','text/javascript'),wasmURL:await toBlobURL(b+'/ffmpeg-core.wasm','application/wasm'),
+    classWorkerURL:await toBlobURL('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/umd/814.ffmpeg.js','text/javascript')});
+}
+async function getAsr(m){
+  const id=$('#md').value;if(S.asr&&S.asrId==id)return S.asr;
+  m.textContent='กำลังโหลดโมเดล (ครั้งแรกนาน)…';
+  const{pipeline}=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2');
+  S.asr=await pipeline('automatic-speech-recognition',id,{dtype:'q8',progress_callback:p=>{if(p.status=='progress')m.textContent='โหลดโมเดล '+Math.round(p.progress)+'%'}});
+  S.asrId=id;return S.asr;
+}
+// แบ่งช่วงที่ยาวเป็นท่อนสั้น ๆ (ซับไม่ล้นจอ) แบ่งเวลาตามสัดส่วนตัวอักษร
+function splitSeg(a,b,t){
+  const d=b-a,ch=[...t],sp=/\s/.test(t),n=Math.max(1,Math.ceil(d/4),Math.ceil(ch.length/45));
+  if(n==1)return[{a,b,t}];
+  const out=[];let pos=0;
+  for(let k=1;k<=n&&pos<ch.length;k++){
+    let end=k==n?ch.length:Math.round(ch.length*k/n);
+    while(end<ch.length&&(MK.test(ch[end])||(sp&&!/\s/.test(ch[end-1]))))end++;
+    if(end>pos)out.push({a:a+d*pos/ch.length,b:a+d*end/ch.length,t:ch.slice(pos,end).join('').trim()});
+    pos=end;
+  }
+  return out;
+}
+function wrapTxt(g,t,mw){
+  const sp=/\s/.test(t),L=[];let ln='';
+  for(const tk of sp?t.split(/(?<=\s)/):[...t]){
+    if(!(!sp&&MK.test(tk))&&ln&&g.measureText(ln+tk).width>mw){L.push(ln.trimEnd());ln=tk}else ln+=tk;
+  }
+  L.push(ln.trimEnd());return L;
+}
+function ctaPng(name,price,txt){
+  const c=document.createElement('canvas');c.width=720;c.height=1280;const g=c.getContext('2d');
+  g.fillStyle='rgba(15,15,20,.85)';g.beginPath();g.roundRect(40,380,640,320,28);g.fill();
+  g.textAlign='center';g.textBaseline='middle';
+  const put=(t,fs,col,y)=>{g.font=`bold ${fs}px "Noto Sans Thai","Sarabun",sans-serif`;g.fillStyle=col;
+    wrapTxt(g,t,600).forEach((l,i,a)=>g.fillText(l,360,y+(i-(a.length-1)/2)*fs*1.3))};
+  put(name,52,'#fff',455);
+  if(price!=null&&price!=='')put('฿'+Number(price).toLocaleString('th-TH'),60,'#ffe600',560);
+  put(txt,40,'#fff',645);
+  return new Promise(r=>c.toBlob(b=>b.arrayBuffer().then(a=>r(new Uint8Array(a))),'image/png'));
+}
+async function auto(){
+  const files=[...$('#af').files];if(!files.length)return alert('เลือกวิดีโอก่อน');
+  const m=$('#am'),tl=+$('#tl').value,subsOn=$('#as').checked,W=720,H=1280,bh=360,ps=$('#ps').value,
+    y=Math.round(ps=='top'?H*.08:ps=='mid'?(H-bh)/2:H-bh-H*.08),prod=S.products.find(p=>p.id==$('#apid').value);
+  $('#ao').innerHTML='';S.autoBlob=null;
+  try{
+    m.textContent='กำลังโหลด ffmpeg…';await loadFF();
+    const asr=await getAsr(m),plans=[];
+    // A) ถอดเสียงทุกคลิป → ช่วงที่มีคำพูด
+    for(let i=0;i<files.length;i++){
+      m.textContent=`ถอดเสียงคลิป ${i+1}/${files.length}…`;
+      const au=await audio16k(files[i]),dur=au.length/16000;
+      const r=await asr(au,{language:$('#lg').value,task:'transcribe',return_timestamps:true,chunk_length_s:30,stride_length_s:5}),segs=[];
+      for(const c of r.chunks||[]){
+        const t=c.text.trim();if(!t)continue;
+        const a=Math.max(0,c.timestamp[0]-0.1),b=Math.min(dur,(c.timestamp[1]??dur)+0.2);
+        if(b-a>=0.5)segs.push(...splitSeg(a,b,t));
+      }
+      plans.push({file:files[i],segs});
+    }
+    // B) ตัดท้ายให้พอดีความยาวเป้าหมาย
+    const sum=()=>plans.reduce((s,p)=>s+p.segs.reduce((x,g)=>x+g.b-g.a,0),0);
+    while(sum()>tl){const p=[...plans].reverse().find(p=>p.segs.length);if(!p)break;p.segs.pop();}
+    const all=plans.filter(p=>p.segs.length);
+    if(!all.length)return m.textContent='ไม่พบคำพูดในคลิป';
+    const lastSeg=all[all.length-1].segs.slice(-1)[0];
+    S.autoScript=all.map(p=>p.segs.map(s=>s.t).join(' ')).join('\n');
+    // C) ตัดแต่ละช่วง + ใส่ซับ/CTA (เข้ารหัสแบบเดียวกันเพื่อให้ต่อกันได้)
+    const segFiles=[];let n=0;
+    for(const[pi,p]of all.entries()){
+      await ff.writeFile('in.mp4',await FFmpegUtil.fetchFile(p.file));
+      for(const s of p.segs){
+        m.textContent=`ตัดต่อคลิป ${pi+1}/${all.length} · ช่วงที่ ${n+1}`;
+        const out=`seg${n++}.mp4`,d=s.b-s.a,args=['-ss',s.a.toFixed(2),'-i','in.mp4'];
+        let f="[0:v]crop='min(iw,ih*9/16)':'min(ih,iw*16/9)',scale=720:1280,fps=30,setsar=1,format=yuv420p[v0]",last='v0',k=1;
+        if(subsOn){await ff.writeFile('sub.png',await subPng(s.t,W,bh));args.push('-i','sub.png');f+=`;[${last}][${k}:v]overlay=0:${y}[v${k}]`;last='v'+k;k++}
+        if(s===lastSeg&&prod){
+          await ff.writeFile('cta.png',await ctaPng(prod.name,prod.price,$('#act').value));args.push('-i','cta.png');
+          f+=`;[${last}][${k}:v]overlay=0:0:enable='gte(t,${Math.max(0,d-3).toFixed(2)})'[v${k}]`;last='v'+k;k++;
+        }
+        args.push('-t',d.toFixed(2),'-filter_complex',f,'-map',`[${last}]`,'-map','0:a?','-c:v','libx264','-preset','ultrafast','-crf','28','-c:a','aac','-ar','44100','-ac','2','-r','30',out);
+        await ff.exec(args);segFiles.push(out);
+      }
+      await ff.deleteFile('in.mp4');
+    }
+    // D) ต่อทุกช่วง
+    m.textContent='กำลังต่อคลิป…';
+    await ff.writeFile('list.txt',segFiles.map(f=>`file '${f}'`).join('\n'));
+    await ff.exec(['-f','concat','-safe','0','-i','list.txt','-c','copy','final.mp4']);
+    const d=await ff.readFile('final.mp4');
+    for(const f of segFiles)await ff.deleteFile(f);
+    S.autoBlob=new Blob([d.buffer],{type:'video/mp4'});const u=URL.createObjectURL(S.autoBlob);
+    $('#ao').innerHTML=`<video src="${u}" controls playsinline></video><div class=row><a href="${u}" download="clip.mp4"><button style="width:100%">ดาวน์โหลด</button></a><button class=g onclick=upAuto()>บันทึกเข้า Supabase</button></div>`;
+    m.textContent=`เสร็จแล้ว (${segFiles.length} ช่วง, ~${Math.round(sum())} วิ)`;
+  }catch(x){m.textContent='ผิดพลาด: '+x.message}
+}
+async function upAuto(){
+  if(!S.autoBlob)return;
+  const{data:{user}}=await sb.auth.getUser(),path=`${user.id}/${Date.now()}.mp4`;
+  const u=await sb.storage.from('clips').upload(path,S.autoBlob,{contentType:'video/mp4'});
+  if(u.error)return alert(u.error.message);
+  const r=await sb.from('clips').insert({title:'ออโต้ '+new Date().toLocaleDateString('th-TH'),product_id:$('#apid').value||null,status:'editing',out_path:path,script:S.autoScript});
+  r.error?alert(r.error.message):alert('บันทึกแล้ว ดูได้ในแท็บคลิป');
+}
+init();
+</script></body></html>
