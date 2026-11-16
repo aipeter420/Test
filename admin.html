@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reel Share · แอดมิน</title>
+<style>
+:root{--ink:#12263a;--mint:#12936b;--bg:#eef3f6;--card:#fff;--line:#d9e2e8;--mute:#5f7385;--blue:#2b6cb0;--red:#c53030}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,"Noto Sans Thai",sans-serif;padding-bottom:84px}
+header{background:var(--ink);color:#fff;padding:14px 16px;display:flex;justify-content:space-between;align-items:center}
+header a{color:#9fb3c4}
+main{padding:12px;max-width:640px;margin:auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
+.row{display:flex;gap:8px;justify-content:space-between;align-items:flex-start;margin-top:8px}
+.row:first-child{margin-top:0}
+small{color:var(--mute);display:block}
+.tag{font-size:13px;font-weight:600;white-space:nowrap}
+button{flex:1;border:0;border-radius:10px;padding:10px;font:inherit;font-weight:600;background:var(--ink);color:#fff;cursor:pointer}
+button.alt{background:#e3ecf2;color:var(--ink)} button.ok{background:var(--mint)} button.no{background:#fde8e8;color:var(--red)}
+button:focus-visible,input:focus-visible{outline:3px solid var(--blue);outline-offset:2px}
+input{width:100%;padding:10px;border:1px solid var(--line);border-radius:10px;font:inherit;margin-top:6px}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:#fff;border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+nav button{background:none;color:var(--mute);border-radius:0;padding:14px}
+nav button.on{color:var(--ink);box-shadow:inset 0 3px 0 var(--mint)}
+.stat{flex:1;text-align:center}.stat b{font-size:24px}
+.login{text-align:center;padding:64px 20px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+// ใช้ค่าเดียวกับ index.html (ล็อกอินร่วมกันได้เพราะอยู่โดเมนเดียวกัน)
+const CFG = { url: "https://YOUR-PROJECT.supabase.co", key: "YOUR_ANON_KEY" };
+const sb = supabase.createClient(CFG.url, CFG.key);
+const app = document.getElementById("app");
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+const today = () => new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Bangkok" });
+let tab = "home", q = "", M = [];
+
+function deny(m){ app.innerHTML = `<div class="login"><h2>${esc(m)}</h2><p><a href="index.html">ไปหน้าหลักเพื่อเข้าสู่ระบบ</a></p></div>`; }
+
+async function init(){
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return deny("ยังไม่ได้ล็อกอิน");
+  const me = (await sb.from("members").select("is_admin").eq("id", session.user.id).single()).data;
+  if (!me?.is_admin) return deny("บัญชีนี้ไม่ใช่แอดมิน");
+  render();
+}
+
+async function homeView(){
+  const r = await sb.rpc("admin_stats"); const s = (r.data || [])[0];
+  if (!s) return `<div class="card">โหลดไม่ได้: ${esc(r.error?.message)}</div>`;
+  const c = (n, l) => `<div class="card stat"><b>${n}</b><small>${l}</small></div>`;
+  return `<div class="row">${c(s.n_members,"สมาชิก")}${c(s.n_vip,"VIP")}${c(s.n_banned,"ถูกแบน")}</div>
+    <div class="row">${c(s.links_today,"ลิงก์วันนี้")}${c(s.tasks_today,"งานที่เปิดวันนี้")}${c(s.pending,"รอตรวจ")}</div>
+    <div class="card"><b>โหมด VIP</b><small>${s.vip_required ? "เปิด: คนทั่วไปวางได้ 1 ลิงก์/วัน, VIP วางได้ 2 ลิงก์" : "ปิด: ทุกคนวางได้ 2 ลิงก์/วัน"}</small>
+    <div class="row"><button data-a="vipmode" data-on="${s.vip_required ? 0 : 1}">${s.vip_required ? "ปิดโหมด VIP" : "เปิดโหมด VIP"}</button></div></div>`;
+}
+
+async function membersView(){
+  M = (await sb.rpc("admin_members", { p_q: q })).data || [];
+  const t = today();
+  const head = `<div class="card"><input id="q" placeholder="ค้นหาชื่อหรือรหัสสมาชิก" value="${esc(q)}">
+    <div class="row"><button data-a="search">ค้นหา</button><button class="alt" data-a="csv">Export CSV</button></div><small>พบ ${M.length} คน</small></div>`;
+  return head + M.map(m => { const vip = m.vip_until && m.vip_until >= t;
+    return `<div class="card"><div class="row"><div><b>${esc(m.display_name)}</b><small>${esc(m.member_code)} · ⭐${m.points} · ลิงก์วันนี้ ${m.links_today}${m.is_admin ? " · แอดมิน" : ""}</small></div>
+      <span class="tag" style="color:${m.is_banned ? "#c53030" : vip ? "#12936b" : "#5f7385"}">${m.is_banned ? "ถูกแบน" : vip ? "VIP ถึง " + m.vip_until : "ทั่วไป"}</span></div>
+      <div class="row"><label style="flex:1">กลุ่ม<input type="number" min="1" value="${m.group_no}" data-a="grp" data-id="${m.id}"></label></div>
+      <div class="row"><button class="alt" data-a="vip30" data-id="${m.id}">VIP +30 วัน</button><button class="alt" data-a="vip0" data-id="${m.id}">ยกเลิก VIP</button>
+      <button class="${m.is_banned ? "ok" : "no"}" data-a="ban" data-id="${m.id}">${m.is_banned ? "ปลดแบน" : "แบน"}</button></div></div>`; }).join("");
+}
+
+async function linksView(){
+  const d = (await sb.rpc("admin_links")).data || [];
+  return d.map(l => `<div class="card"><b>${esc(l.title)}</b><small>${esc(l.owner_name)} · ${esc(l.owner_code)} · กลุ่ม ${l.group_no} · ลิงก์ที่ ${l.slot}</small>
+    <small>เปิด ${l.opened} · รอตรวจ ${l.pending} · สำเร็จ ${l.approved}</small>
+    <div class="row"><a href="${esc(l.reel_url)}" target="_blank" rel="noopener" style="flex:1;align-self:center">เปิดลิงก์</a><button class="no" data-a="dellink" data-id="${l.id}">ลบ</button></div></div>`).join("")
+    || `<div class="card">วันนี้ยังไม่มีลิงก์</div>`;
+}
+
+async function render(){
+  const v = tab === "home" ? await homeView() : tab === "members" ? await membersView() : await linksView();
+  const tb = (k, l) => `<button data-a="tab" data-t="${k}" class="${tab === k ? "on" : ""}">${l}</button>`;
+  app.innerHTML = `<header><b>แอดมิน</b><a href="index.html">กลับหน้าสมาชิก</a></header><main>${v}</main><nav>${tb("home","ภาพรวม")}${tb("members","สมาชิก")}${tb("links","ลิงก์วันนี้")}</nav>`;
+}
+
+async function save(id, patch){
+  const m = M.find(x => x.id === id); const n = { group_no: m.group_no, vip_until: m.vip_until, is_banned: m.is_banned, ...patch };
+  const { error } = await sb.rpc("admin_set_member", { p_id: id, p_group: n.group_no, p_vip_until: n.vip_until, p_banned: n.is_banned });
+  if (error) alert(error.message); render();
+}
+
+function csv(){
+  const rows = [["รหัส","ชื่อ","กลุ่ม","VIP ถึง","แบน","คะแนนวันนี้","ลิงก์วันนี้","สมัครเมื่อ"], ...M.map(m => [m.member_code, m.display_name, m.group_no, m.vip_until || "", m.is_banned ? "ใช่" : "", m.points, m.links_today, m.created_at])];
+  const t = "\ufeff" + rows.map(r => r.map(c => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([t], { type: "text/csv;charset=utf-8" }));
+  a.download = "members-" + today() + ".csv"; a.click();
+}
+
+app.onclick = async e => {
+  const b = e.target.closest("button[data-a]"); if (!b) return; const d = b.dataset;
+  if (d.a === "tab") { tab = d.t; render(); }
+  else if (d.a === "search") { q = document.getElementById("q").value.trim(); render(); }
+  else if (d.a === "csv") csv();
+  else if (d.a === "vipmode") { const { error } = await sb.rpc("admin_set_vip_required", { p_on: d.on === "1" }); if (error) alert(error.message); render(); }
+  else if (d.a === "vip30") { const m = M.find(x => x.id === d.id); const base = m.vip_until && m.vip_until > today() ? m.vip_until : today();
+    const nd = new Date(base + "T00:00:00Z"); nd.setUTCDate(nd.getUTCDate() + 30); save(d.id, { vip_until: nd.toISOString().slice(0, 10) }); }
+  else if (d.a === "vip0") save(d.id, { vip_until: null });
+  else if (d.a === "ban") { const m = M.find(x => x.id === d.id); if (m.is_banned || confirm("แบนสมาชิกนี้และลบลิงก์ของวันนี้?")) save(d.id, { is_banned: !m.is_banned }); }
+  else if (d.a === "dellink") { if (confirm("ลบลิงก์นี้และงานที่เกี่ยวข้อง?")) { const { error } = await sb.rpc("admin_delete_link", { p_id: +d.id }); if (error) alert(error.message); render(); } }
+};
+app.onchange = e => { const i = e.target.closest("input[data-a='grp']"); if (i && +i.value >= 1) save(i.dataset.id, { group_no: +i.value }); };
+
+init();
+</script>
+</body>
+</html>
