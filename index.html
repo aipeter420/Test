@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reel Share</title>
+<style>
+:root{--ink:#12263a;--mint:#12936b;--bg:#eef3f6;--card:#fff;--line:#d9e2e8;--mute:#5f7385;--amber:#b7791f;--blue:#2b6cb0;--red:#c53030}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,"Noto Sans Thai",sans-serif;padding-bottom:84px}
+header{background:var(--ink);color:#fff;padding:14px 16px;display:flex;justify-content:space-between;align-items:center}
+header small{color:#9fb3c4;display:block}
+main{padding:12px;max-width:560px;margin:auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
+.row{display:flex;gap:8px;justify-content:space-between;align-items:flex-start;margin-top:8px}
+.row:first-child{margin-top:0}
+small{color:var(--mute);display:block}
+.tag{font-size:13px;font-weight:600;white-space:nowrap}
+.bar{height:8px;background:var(--line);border-radius:4px;margin-top:8px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--mint)}
+button{flex:1;border:0;border-radius:10px;padding:11px;font:inherit;font-weight:600;background:var(--ink);color:#fff;cursor:pointer}
+button.alt{background:#e3ecf2;color:var(--ink)}
+button.ok{background:var(--mint)} button.no{background:#fde8e8;color:var(--red)}
+button:disabled{opacity:.4;cursor:not-allowed}
+button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid var(--blue);outline-offset:2px}
+input{width:100%;padding:11px;border:1px solid var(--line);border-radius:10px;font:inherit;margin-top:8px}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:#fff;border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+nav button{background:none;color:var(--mute);border-radius:0;padding:14px}
+nav button.on{color:var(--ink);box-shadow:inset 0 3px 0 var(--mint)}
+summary{font-weight:600;cursor:pointer} ol{margin:8px 0 0;padding-left:20px}
+.login{text-align:center;padding:64px 20px}
+.login button{background:#06c755;max-width:320px;margin-top:20px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script>
+// ===== ตั้งค่า 3 ค่านี้ =====
+const CFG = { url: "https://YOUR-PROJECT.supabase.co", key: "YOUR_ANON_KEY", line: "YOUR_LINE_CHANNEL_ID" };
+// ===========================
+const sb = supabase.createClient(CFG.url, CFG.key);
+const app = document.getElementById("app");
+const redirect = location.origin + location.pathname;
+const ST = { todo:["ยังไม่ทำ","#b7791f"], opened:["รอหลักฐาน","#b7791f"], submitted:["รอตรวจ","#2b6cb0"], approved:["สำเร็จ","#12936b"], rejected:["ต้องแก้","#c53030"] };
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+const day = d => new Date(d).toLocaleDateString("en-CA", { timeZone: "Asia/Bangkok" });
+let tab = "tasks", me = null;
+
+function fail(m){ app.innerHTML = `<div class="login"><h2>เข้าสู่ระบบไม่สำเร็จ</h2><p>${esc(m)}</p><button onclick="location.href='${redirect}'">ลองใหม่</button></div>`; }
+
+function loginView(){
+  app.innerHTML = `<div class="login"><h1>Reel Share</h1><p>ช่วยเปิดคลิปเพื่อนสมาชิก แล้วให้เพื่อนช่วยเปิดคลิปคุณกลับ</p><button id="li">เข้าสู่ระบบด้วย LINE</button></div>`;
+  document.getElementById("li").onclick = () => {
+    const st = crypto.randomUUID(); localStorage.st = st;
+    location.href = "https://access.line.me/oauth2/v2.1/authorize?" + new URLSearchParams({
+      response_type: "code", client_id: CFG.line, redirect_uri: redirect, state: st, scope: "profile" });
+  };
+}
+
+async function init(){
+  const q = new URLSearchParams(location.search);
+  if (q.get("code")) {
+    if (q.get("state") !== localStorage.st) return fail("state ไม่ตรง ลองกดเข้าสู่ระบบใหม่");
+    const r = await fetch(CFG.url + "/functions/v1/line-login", {
+      method: "POST", headers: { "Content-Type": "application/json", apikey: CFG.key },
+      body: JSON.stringify({ code: q.get("code"), redirect_uri: redirect }) }).then(r => r.json());
+    history.replaceState(null, "", redirect);
+    if (r.error) return fail(r.error);
+    const { error } = await sb.auth.verifyOtp({ token_hash: r.token_hash, type: "magiclink" });
+    if (error) return fail(error.message);
+  }
+  const { data: { session } } = await sb.auth.getSession();
+  if (!session) return loginView();
+  me = (await sb.from("members").select("*").eq("id", session.user.id).single()).data;
+  render();
+}
+
+const G0={need1:0,done1:0,need2:0,done2:0,posted:0,quota:2};
+const pct=(a,b)=>b>0?Math.min(100,a*100/b):0;
+const prog=(l,a,b)=>`<div style="flex:1">${l} · ${a}/${b}<div class="bar"><i style="width:${pct(a,b)}%"></i></div></div>`;
+
+async function tasksView(){
+  const [f,p]=await Promise.all([sb.rpc("get_feed"),sb.rpc("get_progress")]);
+  const d=f.data||[], g=(p.data||[])[0]||G0;
+  const guide=`<details class="card"><summary>📖 วิธีทำภารกิจ 7 ขั้นตอน</summary><ol>
+    <li>กด “เปิด Reel” ในงานที่ยังไม่ทำ</li><li>แตะป้ายสินค้า Shopee บนคลิป</li>
+    <li>ดูชื่อสินค้าบนหน้า Shopee</li><li>กดค้างที่ชื่อ แล้วเลือกคัดลอก (ไม่ใช่คัดลอกลิงก์)</li>
+    <li>กลับมาที่เว็บนี้ กด “ส่งชื่อสินค้า”</li><li>วางชื่อสินค้าแล้วยืนยัน</li>
+    <li>รอเจ้าของคลิปตรวจ ถ้าถูกปฏิเสธให้แก้แล้วส่งใหม่</li></ol></details>`;
+  const head=`<div class="card"><b>⭐ คะแนนวันนี้ ${g.done1+g.done2}</b>
+    <small>ช่วยงานเพื่อนให้ครบก่อนถึงวางลิงก์ได้ และยิ่งช่วยมาก งานคุณยิ่งขึ้นก่อน</small>
+    <div class="row">${prog("รอบ 1",g.done1,g.need1)}${prog("รอบ 2",g.done2,g.need2)}</div></div>`;
+  const list=d.map(t=>{const [l,c]=ST[t.status];const can=t.status==="opened"||t.status==="rejected";
+    return `<div class="card"><div class="row"><div><b>${esc(t.title)}</b><small>รอบ ${t.slot} · ${esc(t.owner_name)} · ${esc(t.owner_code)} · ⭐${t.pts}</small></div><span class="tag" style="color:${c}">${l}</span></div>
+    ${t.product_name?`<small>ชื่อสินค้า: ${esc(t.product_name)}</small>`:""}
+    <div class="row"><button data-a="open" data-id="${t.link_id}" data-url="${esc(t.reel_url)}">▶ เปิด Reel</button>
+    <button class="alt" data-a="submit" data-id="${t.link_id}" ${can?"":"disabled"}>📝 ส่งชื่อสินค้า</button></div></div>`}).join("");
+  return guide+head+(list||`<div class="card">ยังไม่มีงานวันนี้ รอสมาชิกอีกกลุ่มวางลิงก์</div>`);
+}
+
+async function linksView(){
+  const [f,p]=await Promise.all([sb.rpc("get_my_links"),sb.rpc("get_progress")]);
+  const d=f.data||[], g=(p.data||[])[0]||G0;
+  const ids=d.map(l=>l.id);
+  const pend=ids.length?((await sb.from("tasks").select("id,link_id,product_name,member:members(display_name,member_code)").eq("status","submitted")).data||[]).filter(t=>ids.includes(t.link_id)):[];
+  const s=g.posted+1, full=g.posted>=g.quota, need=s===1?g.need1:g.need2, done=s===1?g.done1:g.done2, ready=!full&&done>=need;
+  const msg=full?`วันนี้วางครบ ${g.quota} ลิงก์แล้ว${g.quota===1?" (VIP วางได้ 2 ลิงก์)":""}`:ready?`วางลิงก์ที่ ${s}/${g.quota} ได้แล้ว`:`ช่วยงานรอบ ${s} อีก ${need-done} งาน ก่อนวางลิงก์ที่ ${s}`;
+  const form=`<div class="card"><b>วางลิงก์ใหม่</b><small>${msg}</small>
+    <input id="t" placeholder="ชื่อคลิป / สินค้า" ${ready?"":"disabled"}>
+    <input id="u" placeholder="https://www.facebook.com/share/r/..." inputmode="url" ${ready?"":"disabled"}>
+    <div class="row"><button data-a="post" ${ready?"":"disabled"}>${full?"วันนี้วางครบแล้ว":"วางลิงก์"}</button></div></div>`;
+  const list=d.map(l=>`<div class="card"><b>${esc(l.title)}</b><small>${day(l.created_at)} · ลิงก์ที่ ${l.slot} · เปิดแล้ว ${l.opened}/${l.target} · สำเร็จ ${l.approved}</small>
+    <div class="bar"><i style="width:${pct(l.approved,l.target)}%"></i></div>
+    ${pend.filter(t=>t.link_id===l.id).map(t=>`<div class="row"><div><small>${esc(t.member.display_name)} · ${esc(t.member.member_code)}</small>${esc(t.product_name)}</div>
+      <button class="ok" data-a="rev" data-id="${t.id}" data-ok="1">ผ่าน</button><button class="no" data-a="rev" data-id="${t.id}" data-ok="0">ไม่ผ่าน</button></div>`).join("")}</div>`).join("");
+  return form+list;
+}
+
+async function render(){
+  app.innerHTML = `<header><div><b>${esc(me?.display_name)}</b><small>${esc(me?.member_code)} · กลุ่ม ${me?.group_no}</small></div>${me?.is_admin?`<a href="admin.html" style="color:#9fb3c4;margin-right:12px">แอดมิน</a>`:""}<button class="alt" style="flex:none" data-a="out">ออก</button></header>
+    <main>${tab === "tasks" ? await tasksView() : await linksView()}</main>
+    <nav><button data-a="tab" data-t="tasks" class="${tab === "tasks" ? "on" : ""}">ภารกิจของฉัน</button><button data-a="tab" data-t="links" class="${tab === "links" ? "on" : ""}">ลิงก์ของฉัน</button></nav>`;
+}
+
+async function call(fn, args){ const { error } = await sb.rpc(fn, args); if (error) alert(error.message); await render(); }
+
+app.onclick = async e => {
+  const b = e.target.closest("[data-a]"); if (!b || b.disabled) return; const d = b.dataset;
+  if (d.a === "tab") { tab = d.t; render(); }
+  else if (d.a === "out") { await sb.auth.signOut(); location.href = redirect; }
+  else if (d.a === "open") { window.open(d.url, "_blank", "noopener"); call("open_task", { p_link: +d.id }); }
+  else if (d.a === "submit") { const n = prompt("วางชื่อสินค้าที่คัดลอกจาก Shopee"); if (n) call("submit_product", { p_link: +d.id, p_name: n }); }
+  else if (d.a === "post") { call("post_link", { p_title: document.getElementById("t").value, p_url: document.getElementById("u").value }); }
+  else if (d.a === "rev") { call("review_task", { p_task: +d.id, p_ok: d.ok === "1" }); }
+};
+
+init();
+</script>
+</body>
+</html>
